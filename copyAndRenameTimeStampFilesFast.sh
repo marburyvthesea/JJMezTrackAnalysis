@@ -1,26 +1,20 @@
 #!/bin/bash
 
 base="/Volumes/fsmresfiles/Basic_Sciences/Phys/ContractorLab/Projects/YZ/Miniscope_data/Miniscope_data/Linear_track"
-mouse_num="992"
+mouse_num="994"
 
 dest_webcam="$base/timeStampsBehavCam_copied_${mouse_num}"
 dest_miniscope="$base/timeStampsMiniscope_copied_${mouse_num}"
 
 mkdir -p "$dest_webcam" "$dest_miniscope"
 
-total=$(find "$base" -type f \( \
-    -path "*/${mouse_num}_*/My_WebCam/timeStamps.csv" -o \
-    -path "*/${mouse_num}_*/My_V4_Miniscope/timeStamps.csv" \
-\) | wc -l | tr -d ' ')
-
-echo "Found $total timestamp files for mouse $mouse_num"
+cd "$base" || exit 1
+shopt -s nullglob
 
 count=0
-find "$base" -type f \( \
-    -path "*/${mouse_num}_*/My_WebCam/timeStamps.csv" -o \
-    -path "*/${mouse_num}_*/My_V4_Miniscope/timeStamps.csv" \
-\) -print0 |
-while IFS= read -r -d '' f; do
+
+for f in */${mouse_num}_*/My_WebCam/timeStamps.csv */${mouse_num}_*/My_V4_Miniscope/timeStamps.csv; do
+    [[ -e "$f" ]] || continue
     count=$((count + 1))
 
     session=$(basename "$(dirname "$(dirname "$f")")")
@@ -34,21 +28,11 @@ while IFS= read -r -d '' f; do
         newname="${day}_${session}_timeStampsMiniscope.csv"
         dest="$dest_miniscope/$newname"
     else
-        echo "[$count/$total] Skipping: $f"
         continue
     fi
 
     cp "$f" "$dest"
-
-    if [[ "$total" -gt 0 ]]; then
-        percent=$(( count * 100 / total ))
-    else
-        percent=100
-    fi
-
-    printf "\rProgress: %3d%% (%d/%d)\n" "$percent" "$count" "$total"
-    echo "Copied: $f -> $dest"
+    echo "[$count] Copied: $f -> $dest"
 done
 
-echo "Done."
-
+echo "Done. Copied $count files."
