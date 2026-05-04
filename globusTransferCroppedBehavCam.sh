@@ -4,15 +4,35 @@ set -euo pipefail
 SRC_EP="8f796c9e-f5c8-11e5-9842-22000b9da45e"   # RDSS
 DST_EP="d5990400-6d04-11e5-ba46-22000b92c6ec"   # Quest
 
-SRC_BASE="/rdss/jma819/fsmresfiles/Basic_Sciences/Phys/ContractorLab/Projects/YZ/Miniscope_data/Miniscope_data/Linear_track"
+SRC_BASE="/rdss/jma819/fsmresfiles/Projects/YZ/Miniscope_data/Miniscope_data/Linear_track"
 DST_BASE="/scratch/jma819/behavCamData/YZ_linearTrackExperiments"
 
 LABEL="behavcam_rotated_cropped_avi_to_quest_$(date +%Y%m%d_%H%M%S)"
 BATCH="/tmp/${LABEL}.txt"
 : > "$BATCH"
 
-for mouse_dir in 311 326 328 388 752 757 992 994; do
-  src_dir="${SRC_BASE}/BehavCamConcactenated_${mouse_dir}/rotated_and_cropped_avi"
+mouse_roots="$(
+  globus ls "${SRC_EP}:${SRC_BASE}/" \
+    | tr -d '\r' \
+    | sed '/^$/d' \
+    | grep -E '^BehavCamConcactenated_[0-9]+/$' \
+    | sed 's#/$##' \
+    | sort -V
+)"
+
+if [[ -z "${mouse_roots}" ]]; then
+  echo "ERROR: No BehavCamConcactenated_<mouse> directories found at ${SRC_EP}:${SRC_BASE}/" >&2
+  exit 1
+fi
+
+echo "Found mouse directories:"
+printf '  %s\n' ${mouse_roots}
+
+printf '%s\n' "${mouse_roots}" | while IFS= read -r mouse_root; do
+  [[ -n "$mouse_root" ]] || continue
+
+  mouse_dir="${mouse_root#BehavCamConcactenated_}"
+  src_dir="${SRC_BASE}/${mouse_root}/rotated_and_cropped_avi"
   dst_dir="${DST_BASE}/${mouse_dir}"
 
   if ! globus ls "${SRC_EP}:${src_dir}/" >/dev/null 2>&1; then
