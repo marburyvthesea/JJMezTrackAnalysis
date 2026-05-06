@@ -1,7 +1,7 @@
 #!/bin/bash
 
 base="/Volumes/fsmresfiles/Basic_Sciences/Phys/ContractorLab/Projects/YZ/Miniscope_data/Miniscope_data/Linear_track"
-mouse_num="994"
+mouse_num="989"
 
 dest_webcam="$base/timeStampsBehavCam_copied_${mouse_num}"
 dest_miniscope="$base/timeStampsMiniscope_copied_${mouse_num}"
