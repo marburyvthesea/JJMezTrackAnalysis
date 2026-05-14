@@ -49,6 +49,138 @@ def suprathreshold_to_events(x: ArrayLike1D) -> pd.Series:
     return pd.Series(out)
 
 
+def detect_peak_indices_from_trace(
+    trace: ArrayLike1D,
+    *,
+    threshold: float,
+    smooth_window_samples: Optional[int] = None,
+    min_peak_prominence: Optional[float] = None,
+    min_peak_distance_samples: int = 1,
+    min_peak_width_samples: Optional[float] = None,
+    return_to_baseline_tol: Optional[float] = None,
+    return_to_baseline_window_samples: int = 1,
+) -> np.ndarray:
+    """
+    Detect one peak index per calcium event from a continuous trace.
+
+    This is stricter than simple threshold binarization and is useful when a
+    single large event has small post-peak wiggles that should not count as
+    separate events.
+    """
+    from scipy.signal import find_peaks
+
+    tr = _as_1d_float_array(trace, "trace")
+    work = tr.copy()
+
+    if smooth_window_samples is not None and smooth_window_samples > 1:
+        work = (
+            pd.Series(work)
+            .rolling(window=int(smooth_window_samples), center=True, min_periods=1)
+            .mean()
+            .to_numpy()
+        )
+
+    peak_kwargs: Dict[str, Any] = {
+        "height": threshold,
+        "distance": max(1, int(min_peak_distance_samples)),
+    }
+    if min_peak_prominence is not None:
+        peak_kwargs["prominence"] = float(min_peak_prominence)
+    if min_peak_width_samples is not None:
+        peak_kwargs["width"] = float(min_peak_width_samples)
+
+    peak_idxs, _ = find_peaks(work, **peak_kwargs)
+
+    if return_to_baseline_tol is None or peak_idxs.size <= 1:
+        return peak_idxs.astype(int)
+
+    tol = float(return_to_baseline_tol)
+    window = max(1, int(return_to_baseline_window_samples))
+    accepted: List[int] = [int(peak_idxs[0])]
+
+    def has_baseline_return(start_idx: int, stop_idx: int) -> bool:
+        if stop_idx <= start_idx + 1:
+            return True
+        segment = np.abs(work[start_idx + 1:stop_idx])
+        if segment.size < window:
+            return bool(np.all(segment <= tol))
+        baseline_mask = segment <= tol
+        kernel = np.ones(window, dtype=int)
+        return bool(np.any(np.convolve(baseline_mask.astype(int), kernel, mode="valid") == window))
+
+    for candidate in peak_idxs[1:]:
+        if has_baseline_return(accepted[-1], int(candidate)):
+            accepted.append(int(candidate))
+
+    return np.asarray(accepted, dtype=int)
+
+
+def peaks_binary_from_indices(length: int, peak_indices: Sequence[int]) -> pd.Series:
+    """Create a sparse 0/1 peak vector with 1 only at accepted peak indices."""
+    out = np.zeros(int(length), dtype=int)
+    peak_indices = np.asarray(peak_indices, dtype=int)
+    valid = peak_indices[(peak_indices >= 0) & (peak_indices < len(out))]
+    out[valid] = 1
+    return pd.Series(out)
+
+
+def detect_peaks_binary_from_trace(
+    trace: ArrayLike1D,
+    *,
+    threshold: float,
+    smooth_window_samples: Optional[int] = None,
+    min_peak_prominence: Optional[float] = None,
+    min_peak_distance_samples: int = 1,
+    min_peak_width_samples: Optional[float] = None,
+    return_to_baseline_tol: Optional[float] = None,
+    return_to_baseline_window_samples: int = 1,
+) -> pd.Series:
+    """Convenience wrapper returning a sparse 0/1 peak series."""
+    peak_indices = detect_peak_indices_from_trace(
+        trace,
+        threshold=threshold,
+        smooth_window_samples=smooth_window_samples,
+        min_peak_prominence=min_peak_prominence,
+        min_peak_distance_samples=min_peak_distance_samples,
+        min_peak_width_samples=min_peak_width_samples,
+        return_to_baseline_tol=return_to_baseline_tol,
+        return_to_baseline_window_samples=return_to_baseline_window_samples,
+    )
+    return peaks_binary_from_indices(len(_as_1d_float_array(trace, "trace")), peak_indices)
+
+
+def detect_peaks_df(
+    traces_df: pd.DataFrame,
+    *,
+    threshold: float,
+    cell_prefix: str = "cell_",
+    smooth_window_samples: Optional[int] = None,
+    min_peak_prominence: Optional[float] = None,
+    min_peak_distance_samples: int = 1,
+    min_peak_width_samples: Optional[float] = None,
+    return_to_baseline_tol: Optional[float] = None,
+    return_to_baseline_window_samples: int = 1,
+) -> pd.DataFrame:
+    """
+    Detect sparse per-frame peak markers for each cell column in a dataframe.
+    """
+    cell_cols = _cell_columns(traces_df, cell_prefix=cell_prefix)
+    out = {}
+    for cell_name in cell_cols:
+        out[cell_name] = detect_peaks_binary_from_trace(
+            traces_df[cell_name],
+            threshold=threshold,
+            smooth_window_samples=smooth_window_samples,
+            min_peak_prominence=min_peak_prominence,
+            min_peak_distance_samples=min_peak_distance_samples,
+            min_peak_width_samples=min_peak_width_samples,
+            return_to_baseline_tol=return_to_baseline_tol,
+            return_to_baseline_window_samples=return_to_baseline_window_samples,
+        ).to_numpy()
+
+    return pd.DataFrame(out, index=traces_df.index)
+
+
 def get_peak_stats_for_peak(
     peak_idx: int,
     *,
