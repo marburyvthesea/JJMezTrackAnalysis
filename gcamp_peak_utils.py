@@ -547,6 +547,45 @@ def _cell_index_from_name(cell_name_or_idx: Union[str, int]) -> int:
     return int(text)
 
 
+def _load_spatial_temporal_arrays(
+    extract_mat_path: Union[str, Path],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Load and orient spatial/temporal weights to (n_cells, H, W) and (n_cells, T).
+    """
+    with h5py.File(str(extract_mat_path), "r") as f:
+        out = f["output"]
+        spatial = np.asarray(out["spatial_weights"][()])
+        temporal = np.asarray(out["temporal_weights"][()])
+
+    if temporal.ndim != 2:
+        raise ValueError(f"temporal_weights must be 2D, got shape {temporal.shape}")
+    if spatial.ndim != 3:
+        raise ValueError(f"spatial_weights must be 3D, got shape {spatial.shape}")
+
+    if temporal.shape[0] <= temporal.shape[1]:
+        n_cells = temporal.shape[0]
+        temporal_nc_t = temporal
+    else:
+        n_cells = temporal.shape[1]
+        temporal_nc_t = temporal.T
+
+    if spatial.shape[0] == n_cells:
+        spatial_nc_hw = spatial
+    elif spatial.shape[2] == n_cells:
+        spatial_nc_hw = np.moveaxis(spatial, 2, 0)
+    else:
+        raise ValueError(
+            "Could not align spatial_weights with temporal_weights shapes: "
+            f"spatial={spatial.shape}, temporal={temporal.shape}"
+        )
+
+    return (
+        np.asarray(spatial_nc_hw, dtype=float),
+        np.asarray(temporal_nc_t, dtype=float),
+    )
+
+
 def load_single_cell_spatiotemporal(
     extract_mat_path: Union[str, Path],
     cell_name_or_idx: Union[str, int],
@@ -563,38 +602,60 @@ def load_single_cell_spatiotemporal(
         Shape (T,)
     """
     cell_idx = _cell_index_from_name(cell_name_or_idx)
+    spatial_nc_hw, temporal_nc_t = _load_spatial_temporal_arrays(extract_mat_path)
+    n_cells = temporal_nc_t.shape[0]
+    if cell_idx >= n_cells:
+        raise IndexError(f"cell index {cell_idx} out of range for {n_cells} temporal traces")
 
-    with h5py.File(str(extract_mat_path), "r") as f:
-        out = f["output"]
-        spatial = np.asarray(out["spatial_weights"][()])
-        temporal = np.asarray(out["temporal_weights"][()])
+    return spatial_nc_hw[cell_idx], temporal_nc_t[cell_idx]
 
-    if temporal.ndim != 2:
-        raise ValueError(f"temporal_weights must be 2D, got shape {temporal.shape}")
-    if spatial.ndim != 3:
-        raise ValueError(f"spatial_weights must be 3D, got shape {spatial.shape}")
 
-    if temporal.shape[0] <= temporal.shape[1]:
-        n_cells_temporal = temporal.shape[0]
-        temporal_1d = temporal[cell_idx, :]
-    else:
-        n_cells_temporal = temporal.shape[1]
-        temporal_1d = temporal[:, cell_idx]
+def load_all_cells_spatiotemporal(
+    extract_mat_path: Union[str, Path],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Load all cell spatial footprints and temporal traces from a CNMF-E/CaliAli
+    extract HDF5/MAT file.
 
-    if cell_idx >= n_cells_temporal:
-        raise IndexError(f"cell index {cell_idx} out of range for {n_cells_temporal} temporal traces")
+    Returns
+    -------
+    spatial_nc_hw : np.ndarray
+        Shape (n_cells, H, W)
+    temporal_nc_t : np.ndarray
+        Shape (n_cells, T)
+    """
+    return _load_spatial_temporal_arrays(extract_mat_path)
 
-    if spatial.shape[0] == n_cells_temporal:
-        spatial_2d = spatial[cell_idx, :, :]
-    elif spatial.shape[2] == n_cells_temporal:
-        spatial_2d = spatial[:, :, cell_idx]
-    else:
-        raise ValueError(
-            "Could not align spatial_weights with temporal_weights shapes: "
-            f"spatial={spatial.shape}, temporal={temporal.shape}"
-        )
 
-    return np.asarray(spatial_2d, dtype=float), np.asarray(temporal_1d, dtype=float)
+def _resolve_peak_center_idx(
+    peak_idx: int,
+    *,
+    stats_df: Optional[pd.DataFrame] = None,
+    peak_col: str = "peak_idx",
+) -> int:
+    if stats_df is not None:
+        return int(stats_df.loc[peak_idx, peak_col])
+    return int(peak_idx)
+
+
+def _normalize_movie_float(movie: np.ndarray, normalize_mode: str) -> np.ndarray:
+    movie = np.asarray(movie, dtype=float)
+    if normalize_mode == "clip":
+        lo = np.nanmin(movie)
+        hi = np.nanmax(movie)
+        if hi > lo:
+            return (movie - lo) / (hi - lo)
+        return np.zeros_like(movie)
+    if normalize_mode == "frame":
+        mins = np.nanmin(movie, axis=(1, 2), keepdims=True)
+        maxs = np.nanmax(movie, axis=(1, 2), keepdims=True)
+        denom = maxs - mins
+        return np.divide(movie - mins, denom, out=np.zeros_like(movie), where=denom > 0)
+    raise ValueError("normalize_mode must be 'clip' or 'frame'")
+
+
+def _float_movie_to_uint8(movie: np.ndarray) -> np.ndarray:
+    return np.clip(np.round(movie * 255), 0, 255).astype(np.uint8)
 
 
 def build_single_cell_peak_movie(
@@ -606,9 +667,12 @@ def build_single_cell_peak_movie(
     stats_df: Optional[pd.DataFrame] = None,
     peak_col: str = "peak_idx",
     normalize_mode: str = "clip",
+    include_all_cells: bool = False,
+    highlight_cell: bool = True,
+    highlight_strength: float = 0.85,
 ) -> Tuple[np.ndarray, Dict[str, int]]:
     """
-    Build a grayscale movie clip for one cell around a selected peak.
+    Build a movie clip for one cell around a selected peak.
 
     Parameters
     ----------
@@ -626,52 +690,120 @@ def build_single_cell_peak_movie(
         the actual center sample is read from `stats_df.loc[peak_idx, peak_col]`.
     normalize_mode : {'clip', 'frame'}
         'clip' scales the whole clip by one min/max; 'frame' scales each frame separately.
+    include_all_cells : bool
+        If True, reconstruct activity from all cells over the clip. Otherwise, show
+        only the selected cell.
+    highlight_cell : bool
+        If True and include_all_cells is True, tint the selected cell green.
+    highlight_strength : float
+        Blend strength for the selected-cell green highlight in [0, 1].
 
     Returns
     -------
     movie_uint8 : np.ndarray
-        Shape (T, H, W), uint8
+        Shape (T, H, W) for grayscale or (T, H, W, 3) for RGB, uint8
     meta : dict
         start/end/center indices describing the clip.
     """
-    if stats_df is not None:
-        center_idx = int(stats_df.loc[peak_idx, peak_col])
-    else:
-        center_idx = int(peak_idx)
+    center_idx = _resolve_peak_center_idx(peak_idx, stats_df=stats_df, peak_col=peak_col)
 
     before, after = int(window[0]), int(window[1])
     if before < 0 or after < 0:
         raise ValueError("window values must be >= 0")
 
-    spatial_2d, temporal_1d = load_single_cell_spatiotemporal(extract_mat_path, cell_name_or_idx)
+    cell_idx = _cell_index_from_name(cell_name_or_idx)
+    spatial_2d, temporal_1d = load_single_cell_spatiotemporal(extract_mat_path, cell_idx)
 
     start = max(0, center_idx - before)
     end = min(len(temporal_1d), center_idx + after)
     if end <= start:
         raise ValueError(f"Invalid clip bounds: start={start}, end={end}")
 
-    temporal_slice = temporal_1d[start:end]
-    movie = temporal_slice[:, None, None] * spatial_2d[None, :, :]
-    movie = np.asarray(movie, dtype=float)
+    if include_all_cells:
+        spatial_nc_hw, temporal_nc_t = load_all_cells_spatiotemporal(extract_mat_path)
+        if cell_idx >= spatial_nc_hw.shape[0]:
+            raise IndexError(
+                f"cell index {cell_idx} out of range for {spatial_nc_hw.shape[0]} spatial footprints"
+            )
+        temporal_slice = temporal_nc_t[:, start:end]
+        movie = np.tensordot(temporal_slice.T, spatial_nc_hw, axes=(1, 0))
+        movie = np.asarray(movie, dtype=float)
+        movie_norm = _normalize_movie_float(movie, normalize_mode)
+        movie_rgb = np.repeat(movie_norm[..., None], 3, axis=3)
 
-    if normalize_mode == "clip":
-        lo = np.nanmin(movie)
-        hi = np.nanmax(movie)
-        if hi > lo:
-            movie = (movie - lo) / (hi - lo)
-        else:
-            movie = np.zeros_like(movie)
-    elif normalize_mode == "frame":
-        mins = np.nanmin(movie, axis=(1, 2), keepdims=True)
-        maxs = np.nanmax(movie, axis=(1, 2), keepdims=True)
-        denom = maxs - mins
-        movie = np.divide(movie - mins, denom, out=np.zeros_like(movie), where=denom > 0)
+        if highlight_cell:
+            cell_movie = temporal_nc_t[cell_idx, start:end][:, None, None] * spatial_nc_hw[cell_idx][None, :, :]
+            cell_positive = np.maximum(np.asarray(cell_movie, dtype=float), 0.0)
+            if np.nanmax(cell_positive) > 0:
+                highlight = cell_positive / np.nanmax(cell_positive)
+            else:
+                highlight = np.zeros_like(cell_positive)
+            highlight = np.clip(highlight_strength * highlight, 0.0, 1.0)
+            movie_rgb[..., 0] *= (1.0 - 0.8 * highlight)
+            movie_rgb[..., 2] *= (1.0 - 0.8 * highlight)
+            movie_rgb[..., 1] = np.maximum(movie_rgb[..., 1], highlight)
+
+        movie_uint8 = _float_movie_to_uint8(movie_rgb)
     else:
-        raise ValueError("normalize_mode must be 'clip' or 'frame'")
+        temporal_slice = temporal_1d[start:end]
+        movie = temporal_slice[:, None, None] * spatial_2d[None, :, :]
+        movie_uint8 = _float_movie_to_uint8(_normalize_movie_float(movie, normalize_mode))
 
-    movie_uint8 = np.clip(np.round(movie * 255), 0, 255).astype(np.uint8)
-    meta = {"start": start, "end": end, "center_idx": center_idx}
+    meta = {"start": start, "end": end, "center_idx": center_idx, "cell_idx": cell_idx}
     return movie_uint8, meta
+
+
+def overlay_frame_numbers(
+    movie_uint8: np.ndarray,
+    *,
+    start_frame_idx: int,
+    font_scale: float = 0.5,
+    thickness: int = 1,
+    margin_px: int = 8,
+) -> np.ndarray:
+    """
+    Draw aligned-GCAMP frame numbers in white in the upper-right corner.
+    """
+    import cv2
+
+    if movie_uint8.ndim == 3:
+        movie_bgr = np.repeat(movie_uint8[..., None], 3, axis=3)
+    elif movie_uint8.ndim == 4 and movie_uint8.shape[-1] == 3:
+        movie_bgr = movie_uint8.copy()
+    else:
+        raise ValueError(
+            f"movie_uint8 must have shape (T, H, W) or (T, H, W, 3), got {movie_uint8.shape}"
+        )
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    _, h, w, _ = movie_bgr.shape
+    for frame_offset in range(movie_bgr.shape[0]):
+        text = f"Frame {start_frame_idx + frame_offset}"
+        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        x = max(margin_px, w - tw - margin_px)
+        y = max(th + margin_px, margin_px + th)
+        # draw a black outline under the white text for readability
+        cv2.putText(
+            movie_bgr[frame_offset],
+            text,
+            (x, y),
+            font,
+            font_scale,
+            (0, 0, 0),
+            thickness + 2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            movie_bgr[frame_offset],
+            text,
+            (x, y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
+    return movie_bgr
 
 
 def _save_movie_uint8_with_cv2(
@@ -683,17 +815,25 @@ def _save_movie_uint8_with_cv2(
     codec: str,
 ) -> Path:
     """
-    Save a grayscale movie array of shape (T, H, W) using OpenCV.
+    Save a grayscale or RGB movie array using OpenCV.
     """
     import cv2
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if movie_uint8.ndim != 3:
-        raise ValueError(f"movie_uint8 must have shape (T, H, W), got {movie_uint8.shape}")
+    if movie_uint8.ndim == 3:
+        t, h, w = movie_uint8.shape
+        is_rgb = False
+    elif movie_uint8.ndim == 4 and movie_uint8.shape[-1] == 3:
+        t, h, w, _ = movie_uint8.shape
+        is_rgb = True
+    else:
+        raise ValueError(
+            "movie_uint8 must have shape (T, H, W) or (T, H, W, 3), "
+            f"got {movie_uint8.shape}"
+        )
 
-    t, h, w = movie_uint8.shape
     out_w = max(1, int(round(w * resize_factor)))
     out_h = max(1, int(round(h * resize_factor)))
     fourcc = cv2.VideoWriter_fourcc(*codec)
@@ -707,7 +847,10 @@ def _save_movie_uint8_with_cv2(
         frame = movie_uint8[i]
         if resize_factor != 1.0:
             frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        if is_rgb:
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        else:
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         writer.write(frame_bgr)
 
     writer.release()
@@ -767,6 +910,13 @@ def create_inline_peak_clip(
     resize_factor: float = 1.0,
     output_path: Optional[Union[str, Path]] = None,
     normalize_mode: str = "clip",
+    include_all_cells: bool = False,
+    highlight_cell: bool = True,
+    highlight_strength: float = 0.85,
+    show_frame_numbers: bool = True,
+    frame_number_font_scale: float = 0.5,
+    frame_number_thickness: int = 1,
+    frame_number_margin_px: int = 8,
     output_format: str = "mp4",
     embed: bool = True,
     html_attributes: str = "controls",
@@ -774,6 +924,17 @@ def create_inline_peak_clip(
     """
     Create a short movie clip around one detected peak and return an inline
     notebook display object when IPython is available.
+
+    Parameters
+    ----------
+    include_all_cells : bool
+        If True, render reconstructed activity from all cells instead of only the
+        selected cell.
+    highlight_cell : bool
+        If True together with include_all_cells, tint the selected cell green.
+    show_frame_numbers : bool
+        If True, overlay the aligned-GCAMP/miniscope frame number in the upper
+        right corner of each frame.
     """
     from IPython.display import Video
 
@@ -785,7 +946,19 @@ def create_inline_peak_clip(
         stats_df=stats_df,
         peak_col=peak_col,
         normalize_mode=normalize_mode,
+        include_all_cells=include_all_cells,
+        highlight_cell=highlight_cell,
+        highlight_strength=highlight_strength,
     )
+
+    if show_frame_numbers:
+        movie_uint8 = overlay_frame_numbers(
+            movie_uint8,
+            start_frame_idx=meta["start"],
+            font_scale=frame_number_font_scale,
+            thickness=frame_number_thickness,
+            margin_px=frame_number_margin_px,
+        )
 
     if output_path is None:
         temp_dir = Path(tempfile.gettempdir()) / "gcamp_peak_clips"
