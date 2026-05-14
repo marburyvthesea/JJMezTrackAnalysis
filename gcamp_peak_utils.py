@@ -674,16 +674,16 @@ def build_single_cell_peak_movie(
     return movie_uint8, meta
 
 
-def save_movie_uint8_as_avi(
+def _save_movie_uint8_with_cv2(
     movie_uint8: np.ndarray,
     output_path: Union[str, Path],
     *,
     fps: float = 20.0,
     resize_factor: float = 1.0,
-    codec: str = "MJPG",
+    codec: str,
 ) -> Path:
     """
-    Save a grayscale movie array of shape (T, H, W) to an AVI file.
+    Save a grayscale movie array of shape (T, H, W) using OpenCV.
     """
     import cv2
 
@@ -698,6 +698,10 @@ def save_movie_uint8_as_avi(
     out_h = max(1, int(round(h * resize_factor)))
     fourcc = cv2.VideoWriter_fourcc(*codec)
     writer = cv2.VideoWriter(str(output_path), fourcc, float(fps), (out_w, out_h), True)
+    if not writer.isOpened():
+        raise RuntimeError(
+            f"OpenCV could not open a video writer for {output_path} using codec {codec!r}"
+        )
 
     for i in range(t):
         frame = movie_uint8[i]
@@ -708,6 +712,47 @@ def save_movie_uint8_as_avi(
 
     writer.release()
     return output_path
+
+
+def save_movie_uint8_as_avi(
+    movie_uint8: np.ndarray,
+    output_path: Union[str, Path],
+    *,
+    fps: float = 20.0,
+    resize_factor: float = 1.0,
+    codec: str = "MJPG",
+) -> Path:
+    """
+    Save a grayscale movie array of shape (T, H, W) to an AVI file.
+    """
+    return _save_movie_uint8_with_cv2(
+        movie_uint8,
+        output_path,
+        fps=fps,
+        resize_factor=resize_factor,
+        codec=codec,
+    )
+
+
+def save_movie_uint8_as_mp4(
+    movie_uint8: np.ndarray,
+    output_path: Union[str, Path],
+    *,
+    fps: float = 20.0,
+    resize_factor: float = 1.0,
+    codec: str = "mp4v",
+) -> Path:
+    """
+    Save a grayscale movie array of shape (T, H, W) to an MP4 file that
+    browsers can usually render inline inside notebooks.
+    """
+    return _save_movie_uint8_with_cv2(
+        movie_uint8,
+        output_path,
+        fps=fps,
+        resize_factor=resize_factor,
+        codec=codec,
+    )
 
 
 def create_inline_peak_clip(
@@ -722,7 +767,9 @@ def create_inline_peak_clip(
     resize_factor: float = 1.0,
     output_path: Optional[Union[str, Path]] = None,
     normalize_mode: str = "clip",
+    output_format: str = "mp4",
     embed: bool = True,
+    html_attributes: str = "controls",
 ):
     """
     Create a short movie clip around one detected peak and return an inline
@@ -743,13 +790,37 @@ def create_inline_peak_clip(
     if output_path is None:
         temp_dir = Path(tempfile.gettempdir()) / "gcamp_peak_clips"
         cell_text = str(cell_name_or_idx).replace("/", "_")
-        output_path = temp_dir / f"{cell_text}_peak_{meta['center_idx']}.avi"
+        suffix = ".mp4" if output_format.lower() == "mp4" else ".avi"
+        output_path = temp_dir / f"{cell_text}_peak_{meta['center_idx']}{suffix}"
 
-    saved_path = save_movie_uint8_as_avi(
-        movie_uint8,
-        output_path,
-        fps=fps,
-        resize_factor=resize_factor,
-    )
+    output_format = output_format.lower()
+    if output_format == "mp4":
+        saved_path = save_movie_uint8_as_mp4(
+            movie_uint8,
+            output_path,
+            fps=fps,
+            resize_factor=resize_factor,
+        )
+        video_obj = Video(
+            filename=str(saved_path),
+            embed=embed,
+            mimetype="video/mp4",
+            html_attributes=html_attributes,
+        )
+    elif output_format == "avi":
+        saved_path = save_movie_uint8_as_avi(
+            movie_uint8,
+            output_path,
+            fps=fps,
+            resize_factor=resize_factor,
+        )
+        video_obj = Video(
+            filename=str(saved_path),
+            embed=embed,
+            mimetype="video/x-msvideo",
+            html_attributes=html_attributes,
+        )
+    else:
+        raise ValueError("output_format must be 'mp4' or 'avi'")
 
-    return Video(str(saved_path), embed=embed), saved_path, meta
+    return video_obj, saved_path, meta
