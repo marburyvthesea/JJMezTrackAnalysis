@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import tempfile
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -281,18 +282,64 @@ def find_peak_indices_from_binarized(
 def compute_peak_stats_from_cell(
     peaks_binary: ArrayLike1D,
     *,
-    z_scores: ArrayLike1D,
+    z_scores: Optional[ArrayLike1D] = None,
     cell_trace: Optional[ArrayLike1D] = None,
     tol: float = 0.25,
     window_len_onset: int = 3,
     window_len_offset: int = 3,
     plt_region: int = 10,
+    behavior_df: Optional[pd.DataFrame] = None,
+    behavior_columns: Optional[Sequence[str]] = None,
+    gcamp_source: Optional[Union[pd.DataFrame, str, Path]] = None,
+    cell_name: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Compute peak stats for all events in one cell trace."""
+    """
+    Compute peak stats for all events in one cell trace.
+
+    Parameters
+    ----------
+    behavior_df : pd.DataFrame, optional
+        Behavior-aligned dataframe containing columns like X/Y/Velocity. If
+        provided, the clipped window for each available behavior column is added
+        to the returned dataframe as `<column>_clipped_region`.
+    behavior_columns : sequence[str], optional
+        Which behavior columns to append. If omitted, uses X/Y and whichever of
+        Velocity_spatial_filtered or Velocity is present.
+    gcamp_source : DataFrame or path-like, optional
+        Convenience source for a saved aligned_GCAMP table. If provided together
+        with `cell_name`, z_scores/cell_trace and default behavior_df can be
+        pulled from the saved table.
+    cell_name : str, optional
+        Cell column name to use when loading trace data from gcamp_source.
+    """
+    gcamp_df = _coerce_gcamp_dataframe(gcamp_source) if gcamp_source is not None else None
+
+    if z_scores is None:
+        if gcamp_df is None or cell_name is None:
+            raise ValueError("Provide z_scores or provide both gcamp_source and cell_name")
+        if cell_name not in gcamp_df.columns:
+            raise KeyError(f"{cell_name!r} not found in gcamp_source columns")
+        z_scores = gcamp_df[cell_name]
+
+    if cell_trace is None:
+        if gcamp_df is not None and cell_name is not None and cell_name in gcamp_df.columns:
+            cell_trace = gcamp_df[cell_name]
+        else:
+            cell_trace = z_scores
+
+    if behavior_df is None and gcamp_df is not None:
+        behavior_df = gcamp_df
+
     z = _as_1d_float_array(z_scores, "z_scores")
-    tr = _as_1d_float_array(cell_trace if cell_trace is not None else z_scores, "cell_trace")
+    tr = _as_1d_float_array(cell_trace, "cell_trace")
+    if behavior_df is not None and len(behavior_df) != len(z):
+        raise ValueError(
+            "behavior_df must have the same number of rows as the trace, "
+            f"got {len(behavior_df)} and {len(z)}"
+        )
 
     peak_idxs = find_peak_indices_from_binarized(peaks_binary, z_scores=z)
+    clip_behavior_cols = _resolve_behavior_clip_columns(behavior_df, behavior_columns)
 
     rows: List[Dict[str, Any]] = []
     for pidx in peak_idxs:
@@ -305,20 +352,118 @@ def compute_peak_stats_from_cell(
             z_scores=z,
             cell_trace=tr,
         )
-        rows.append(
-            {
-                "peak_idx": stats.peak_idx,
-                "onset_idx": stats.onset_idx,
-                "offset_idx": stats.offset_idx,
-                "amp_max": stats.amp_max,
-                "length_samples": stats.length_samples,
-                "clip_start": stats.clip_start,
-                "clip_end": stats.clip_end,
-                "clipped_region": stats.clipped_region,
-            }
-        )
+        row: Dict[str, Any] = {
+            "peak_idx": stats.peak_idx,
+            "onset_idx": stats.onset_idx,
+            "offset_idx": stats.offset_idx,
+            "amp_max": stats.amp_max,
+            "length_samples": stats.length_samples,
+            "clip_start": stats.clip_start,
+            "clip_end": stats.clip_end,
+            "clipped_region": stats.clipped_region,
+        }
+        for col in clip_behavior_cols:
+            row[f"{col}_clipped_region"] = _slice_clipped_region(
+                behavior_df[col],
+                stats.clip_start,
+                stats.clip_end,
+            )
+        rows.append(row)
 
     return pd.DataFrame(rows)
+
+
+def load_aligned_gcamp_df(source: Union[str, Path]) -> pd.DataFrame:
+    """
+    Load a saved aligned_GCAMP table from disk.
+
+    Currently supports CSV, parquet, and pickle formats. For CSVs saved with a
+    default pandas index, the unnamed first column is restored as the index.
+    """
+    path = Path(source)
+    suffix = path.suffix.lower()
+
+    if suffix == ".csv":
+        df = pd.read_csv(path)
+        if len(df.columns) > 0:
+            first_col = str(df.columns[0])
+            if first_col.startswith("Unnamed:") or first_col in {"index", "level_0"}:
+                df = df.set_index(df.columns[0], drop=True)
+        return df
+
+    if suffix in {".parquet", ".pq"}:
+        return pd.read_parquet(path)
+
+    if suffix in {".pkl", ".pickle"}:
+        return pd.read_pickle(path)
+
+    raise ValueError(
+        f"Unsupported aligned_GCAMP file extension {suffix!r} for {path}. "
+        "Use .csv, .parquet, .pq, .pkl, or .pickle."
+    )
+
+
+def _coerce_gcamp_dataframe(source: Union[pd.DataFrame, str, Path]) -> pd.DataFrame:
+    if isinstance(source, pd.DataFrame):
+        return source
+    return load_aligned_gcamp_df(source)
+
+
+def _resolve_behavior_clip_columns(
+    behavior_df: Optional[pd.DataFrame],
+    behavior_columns: Optional[Sequence[str]],
+) -> List[str]:
+    if behavior_df is None:
+        return []
+
+    if behavior_columns is not None:
+        return [col for col in behavior_columns if col in behavior_df.columns]
+
+    cols: List[str] = [col for col in ("X_coor", "Y_coor") if col in behavior_df.columns]
+    if "Velocity_spatial_filtered" in behavior_df.columns:
+        cols.append("Velocity_spatial_filtered")
+    elif "Velocity" in behavior_df.columns:
+        cols.append("Velocity")
+    return cols
+
+
+def _slice_clipped_region(
+    values: Union[pd.Series, np.ndarray, Sequence[Any]],
+    clip_start: int,
+    clip_end: int,
+) -> np.ndarray:
+    arr = np.asarray(values)
+    return arr[int(clip_start):int(clip_end) + 1].copy()
+
+
+def _serialize_peak_stats_value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return json.dumps(value.tolist())
+    if isinstance(value, pd.Series):
+        return json.dumps(value.to_list())
+    if isinstance(value, (list, tuple)):
+        return json.dumps(list(value))
+    return value
+
+
+def save_peak_stats_csv(
+    stats_df: pd.DataFrame,
+    output_csv_path: Union[str, Path],
+) -> Path:
+    """
+    Save a peak-stats dataframe to CSV, serializing array-valued clipped-region
+    columns into JSON strings.
+    """
+    output_path = Path(output_csv_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    serializable_df = stats_df.copy()
+    for col in serializable_df.columns:
+        if serializable_df[col].dtype == "object":
+            serializable_df[col] = serializable_df[col].map(_serialize_peak_stats_value)
+
+    serializable_df.to_csv(output_path, index=False)
+    return output_path
 
 
 def _cell_columns(df: pd.DataFrame, cell_prefix: str = "cell_") -> List[str]:
@@ -335,9 +480,12 @@ def compute_peak_stats_for_all_cells(
     window_len_offset: int = 3,
     plt_region: int = 10,
     use_onsets: bool = False,
+    behavior_df: Optional[pd.DataFrame] = None,
+    behavior_columns: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     """Compute peak stats for every cell column shared by both dataframes."""
     peaks_binary_df = signal_peaks.apply(suprathreshold_to_events, axis=0) if use_onsets else signal_peaks
+    clip_behavior_cols = _resolve_behavior_clip_columns(behavior_df, behavior_columns)
 
     cell_cols = [c for c in _cell_columns(signal_peaks, cell_prefix=cell_prefix) if c in aligned_cell_traces.columns]
     rows = []
@@ -350,6 +498,8 @@ def compute_peak_stats_for_all_cells(
             window_len_onset=window_len_onset,
             window_len_offset=window_len_offset,
             plt_region=plt_region,
+            behavior_df=behavior_df,
+            behavior_columns=behavior_columns,
         )
         if stats_df.empty:
             continue
@@ -372,6 +522,7 @@ def compute_peak_stats_for_all_cells(
                 "clip_start",
                 "clip_end",
                 "clipped_region",
+                *[f"{col}_clipped_region" for col in clip_behavior_cols],
             ]
         )
 
@@ -379,18 +530,20 @@ def compute_peak_stats_for_all_cells(
 
 
 def compute_peak_stats_from_gcamp_df(
-    gcamp_with_velocity: pd.DataFrame,
+    gcamp_with_velocity: Union[pd.DataFrame, str, Path],
     signal_peaks: pd.DataFrame,
     cell_name: str,
     *,
-    trace_source: Optional[pd.DataFrame] = None,
+    trace_source: Optional[Union[pd.DataFrame, str, Path]] = None,
     tol: float = 0.25,
     window_len_onset: int = 3,
     window_len_offset: int = 3,
     plt_region: int = 10,
+    behavior_columns: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     """Thin wrapper that uses one cell column directly from GCAMP_with_velocity."""
-    trace_df = gcamp_with_velocity if trace_source is None else trace_source
+    gcamp_df = _coerce_gcamp_dataframe(gcamp_with_velocity)
+    trace_df = gcamp_df if trace_source is None else _coerce_gcamp_dataframe(trace_source)
     if cell_name not in signal_peaks.columns:
         raise KeyError(f"{cell_name!r} not found in signal_peaks columns")
     if cell_name not in trace_df.columns:
@@ -404,11 +557,13 @@ def compute_peak_stats_from_gcamp_df(
         window_len_onset=window_len_onset,
         window_len_offset=window_len_offset,
         plt_region=plt_region,
+        behavior_df=gcamp_df,
+        behavior_columns=behavior_columns,
     )
 
 
 def compute_peak_stats_for_all_cells_from_gcamp_df(
-    gcamp_with_velocity: pd.DataFrame,
+    gcamp_with_velocity: Union[pd.DataFrame, str, Path],
     signal_peaks: pd.DataFrame,
     *,
     cell_prefix: str = "cell_",
@@ -417,18 +572,29 @@ def compute_peak_stats_for_all_cells_from_gcamp_df(
     window_len_offset: int = 3,
     plt_region: int = 10,
     use_onsets: bool = False,
+    behavior_columns: Optional[Sequence[str]] = None,
+    output_csv_path: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
-    """Wrapper around compute_peak_stats_for_all_cells using GCAMP_with_velocity as trace source."""
-    return compute_peak_stats_for_all_cells(
+    """
+    Wrapper around compute_peak_stats_for_all_cells using GCAMP_with_velocity
+    as trace source. Accepts either an in-memory dataframe or a saved aligned_GCAMP file.
+    """
+    gcamp_df = _coerce_gcamp_dataframe(gcamp_with_velocity)
+    stats_df = compute_peak_stats_for_all_cells(
         signal_peaks,
-        gcamp_with_velocity,
+        gcamp_df,
         cell_prefix=cell_prefix,
         tol=tol,
         window_len_onset=window_len_onset,
         window_len_offset=window_len_offset,
         plt_region=plt_region,
         use_onsets=use_onsets,
+        behavior_df=gcamp_df,
+        behavior_columns=behavior_columns,
     )
+    if output_csv_path is not None:
+        save_peak_stats_csv(stats_df, output_csv_path)
+    return stats_df
 
 
 def slice_cell_trace_and_peaks(
