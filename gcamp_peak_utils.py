@@ -824,6 +824,17 @@ def _float_movie_to_uint8(movie: np.ndarray) -> np.ndarray:
     return np.clip(np.round(movie * 255), 0, 255).astype(np.uint8)
 
 
+def _movie_uint8_to_rgb(movie_uint8: np.ndarray) -> np.ndarray:
+    if movie_uint8.ndim == 3:
+        return np.repeat(movie_uint8[..., None], 3, axis=3)
+    if movie_uint8.ndim == 4 and movie_uint8.shape[-1] == 3:
+        return movie_uint8.copy()
+    raise ValueError(
+        "movie_uint8 must have shape (T, H, W) or (T, H, W, 3), "
+        f"got {movie_uint8.shape}"
+    )
+
+
 def build_single_cell_peak_movie(
     extract_mat_path: Union[str, Path],
     cell_name_or_idx: Union[str, int],
@@ -919,6 +930,159 @@ def build_single_cell_peak_movie(
     return movie_uint8, meta
 
 
+def render_static_trace_panel(
+    trace: ArrayLike1D,
+    *,
+    width: int,
+    height: int = 96,
+    clip_bounds: Optional[Tuple[int, int]] = None,
+    center_idx: Optional[int] = None,
+    panel_label: Optional[str] = None,
+) -> np.ndarray:
+    """
+    Render a static trace panel that can be appended beneath movie frames.
+
+    The full trace is shown once, with the current clip bounds lightly shaded and
+    the selected peak center marked by a vertical line.
+    """
+    import cv2
+
+    arr = _as_1d_float_array(trace, "trace")
+    if arr.size == 0:
+        raise ValueError("trace must contain at least one sample")
+    if width < 16 or height < 16:
+        raise ValueError("trace panel width and height must both be at least 16 pixels")
+
+    panel = np.full((height, width, 3), 255, dtype=np.uint8)
+
+    margin_left = 8
+    margin_right = 8
+    margin_top = 12 if panel_label else 8
+    margin_bottom = 8
+    inner_w = max(2, width - margin_left - margin_right)
+    inner_h = max(2, height - margin_top - margin_bottom)
+
+    finite = np.isfinite(arr)
+    if np.any(finite):
+        arr_finite = arr[finite]
+        lo = float(np.min(arr_finite))
+        hi = float(np.max(arr_finite))
+    else:
+        lo = 0.0
+        hi = 1.0
+
+    if np.isclose(hi, lo):
+        lo -= 0.5
+        hi += 0.5
+
+    def _sample_to_x(sample_idx: int) -> int:
+        if arr.size == 1:
+            return margin_left
+        clipped = int(np.clip(sample_idx, 0, arr.size - 1))
+        frac = clipped / float(arr.size - 1)
+        return margin_left + int(round(frac * (inner_w - 1)))
+
+    if clip_bounds is not None:
+        clip_start, clip_end = clip_bounds
+        x0 = _sample_to_x(clip_start)
+        x1 = _sample_to_x(max(clip_start, clip_end - 1))
+        x0, x1 = sorted((x0, x1))
+        cv2.rectangle(
+            panel,
+            (x0, margin_top),
+            (x1, margin_top + inner_h - 1),
+            (244, 236, 214),
+            thickness=-1,
+        )
+
+    sample_positions = np.linspace(0, arr.size - 1, inner_w)
+    sampled = np.interp(sample_positions, np.arange(arr.size), arr)
+    y_frac = (sampled - lo) / (hi - lo)
+    y_coords = margin_top + np.round((1.0 - y_frac) * (inner_h - 1)).astype(np.int32)
+    x_coords = margin_left + np.arange(inner_w, dtype=np.int32)
+    points = np.column_stack([x_coords, y_coords]).reshape(-1, 1, 2)
+
+    cv2.rectangle(
+        panel,
+        (margin_left, margin_top),
+        (margin_left + inner_w - 1, margin_top + inner_h - 1),
+        (208, 208, 208),
+        thickness=1,
+    )
+
+    if center_idx is not None:
+        x_center = _sample_to_x(center_idx)
+        cv2.line(
+            panel,
+            (x_center, margin_top),
+            (x_center, margin_top + inner_h - 1),
+            (70, 135, 255),
+            thickness=1,
+            lineType=cv2.LINE_AA,
+        )
+
+    if clip_bounds is not None:
+        clip_start, clip_end = clip_bounds
+        for boundary_idx in (clip_start, max(clip_start, clip_end - 1)):
+            x_boundary = _sample_to_x(boundary_idx)
+            cv2.line(
+                panel,
+                (x_boundary, margin_top),
+                (x_boundary, margin_top + inner_h - 1),
+                (184, 140, 64),
+                thickness=1,
+                lineType=cv2.LINE_AA,
+            )
+
+    cv2.polylines(
+        panel,
+        [points],
+        isClosed=False,
+        color=(52, 52, 52),
+        thickness=1,
+        lineType=cv2.LINE_AA,
+    )
+
+    if panel_label:
+        cv2.putText(
+            panel,
+            panel_label,
+            (margin_left, 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            (90, 90, 90),
+            1,
+            cv2.LINE_AA,
+        )
+
+    return panel
+
+
+def append_static_trace_panel(
+    movie_uint8: np.ndarray,
+    trace: ArrayLike1D,
+    *,
+    clip_bounds: Optional[Tuple[int, int]] = None,
+    center_idx: Optional[int] = None,
+    panel_height: int = 96,
+    panel_label: Optional[str] = None,
+) -> np.ndarray:
+    """
+    Append one static trace image beneath every movie frame.
+    """
+    movie_rgb = _movie_uint8_to_rgb(movie_uint8)
+    trace_panel = render_static_trace_panel(
+        trace,
+        width=movie_rgb.shape[2],
+        height=panel_height,
+        clip_bounds=clip_bounds,
+        center_idx=center_idx,
+        panel_label=panel_label,
+    )
+    panel_stack = np.repeat(trace_panel[None, ...], movie_rgb.shape[0], axis=0)
+    return np.concatenate([movie_rgb, panel_stack], axis=1)
+
+
 def overlay_frame_numbers(
     movie_uint8: np.ndarray,
     *,
@@ -932,14 +1096,7 @@ def overlay_frame_numbers(
     """
     import cv2
 
-    if movie_uint8.ndim == 3:
-        movie_bgr = np.repeat(movie_uint8[..., None], 3, axis=3)
-    elif movie_uint8.ndim == 4 and movie_uint8.shape[-1] == 3:
-        movie_bgr = movie_uint8.copy()
-    else:
-        raise ValueError(
-            f"movie_uint8 must have shape (T, H, W) or (T, H, W, 3), got {movie_uint8.shape}"
-        )
+    movie_bgr = _movie_uint8_to_rgb(movie_uint8)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
     _, h, w, _ = movie_bgr.shape
@@ -1079,6 +1236,8 @@ def create_inline_peak_clip(
     include_all_cells: bool = False,
     highlight_cell: bool = True,
     highlight_strength: float = 0.85,
+    show_trace_panel: bool = False,
+    trace_panel_height: int = 96,
     show_frame_numbers: bool = True,
     frame_number_font_scale: float = 0.5,
     frame_number_thickness: int = 1,
@@ -1098,6 +1257,9 @@ def create_inline_peak_clip(
         selected cell.
     highlight_cell : bool
         If True together with include_all_cells, tint the selected cell green.
+    show_trace_panel : bool
+        If True, append a static panel of the selected cell's full trace beneath
+        each movie frame, with the current clip bounds and peak center marked.
     show_frame_numbers : bool
         If True, overlay the aligned-GCAMP/miniscope frame number in the upper
         right corner of each frame.
@@ -1116,6 +1278,17 @@ def create_inline_peak_clip(
         highlight_cell=highlight_cell,
         highlight_strength=highlight_strength,
     )
+
+    if show_trace_panel:
+        _, temporal_1d = load_single_cell_spatiotemporal(extract_mat_path, meta["cell_idx"])
+        movie_uint8 = append_static_trace_panel(
+            movie_uint8,
+            temporal_1d,
+            clip_bounds=(meta["start"], meta["end"]),
+            center_idx=meta["center_idx"],
+            panel_height=trace_panel_height,
+            panel_label=f"{cell_name_or_idx} trace",
+        )
 
     if show_frame_numbers:
         movie_uint8 = overlay_frame_numbers(
