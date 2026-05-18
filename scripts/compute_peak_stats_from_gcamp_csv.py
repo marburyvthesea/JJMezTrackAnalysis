@@ -273,7 +273,10 @@ def compute_peak_stats_for_all_cells(
     n_cells = len(cell_cols)
     next_event_report = max(1, int(progress_every_events))
 
-    print(f"Starting peak-stats analysis for {n_cells} cells across {len(gcamp_df)} frames")
+    print(
+        f"Starting peak-stats analysis for {n_cells} cells across {len(gcamp_df)} frames",
+        flush=True,
+    )
 
     for cell_idx, cell_name in enumerate(cell_cols, start=1):
         trace = gcamp_df[cell_name]
@@ -329,7 +332,8 @@ def compute_peak_stats_for_all_cells(
             pct = (100.0 * cell_idx / n_cells) if n_cells > 0 else 100.0
             print(
                 f"[progress] cells {cell_idx}/{n_cells} ({pct:.1f}%) "
-                f"| current={cell_name} | cumulative_events={cumulative_events}"
+                f"| current={cell_name} | cumulative_events={cumulative_events}",
+                flush=True,
             )
             while cumulative_events >= next_event_report:
                 next_event_report += max(1, int(progress_every_events))
@@ -396,10 +400,10 @@ def main() -> int:
     )
     save_peak_stats_csv(stats_df, output_csv)
 
-    print(f"Processed: {gcamp_csv}")
-    print(f"Output:    {output_csv}")
-    print(f"Cells:     {len(cell_cols)}")
-    print(f"Events:    {len(stats_df)}")
+    print(f"Processed: {gcamp_csv}", flush=True)
+    print(f"Output:    {output_csv}", flush=True)
+    print(f"Cells:     {len(cell_cols)}", flush=True)
+    print(f"Events:    {len(stats_df)}", flush=True)
     return 0
 
 

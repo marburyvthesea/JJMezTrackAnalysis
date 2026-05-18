@@ -94,7 +94,9 @@ else
     exit 1
 fi
 
-CMD=(python "$SCRIPT_PATH" --gcamp-csv "$GCAMP_CSV")
+export PYTHONUNBUFFERED=1
+
+CMD=(python -u "$SCRIPT_PATH" --gcamp-csv "$GCAMP_CSV")
 if [[ -n "$OUTPUT_DIR" ]]; then
     CMD+=(--output-dir "$OUTPUT_DIR")
 fi
