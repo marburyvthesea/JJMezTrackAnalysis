@@ -68,6 +68,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-len-onset", type=int, default=3)
     parser.add_argument("--window-len-offset", type=int, default=3)
     parser.add_argument("--plt-region", type=int, default=10)
+    parser.add_argument(
+        "--progress-every-cells",
+        type=int,
+        default=10,
+        help="Print a progress update after this many cells have been processed.",
+    )
+    parser.add_argument(
+        "--progress-every-events",
+        type=int,
+        default=1000,
+        help="Print a progress update whenever cumulative detected events cross this interval.",
+    )
     return parser.parse_args()
 
 
@@ -252,12 +264,18 @@ def compute_peak_stats_for_all_cells(
     window_len_offset: int,
     plt_region: int,
     behavior_columns: Sequence[str],
+    progress_every_cells: int = 10,
+    progress_every_events: int = 1000,
 ) -> pd.DataFrame:
     requested_behavior_cols = resolve_behavior_clip_columns(gcamp_df, behavior_columns)
     cell_cols = cell_columns(gcamp_df, cell_prefix=cell_prefix)
     rows: List[Dict[str, Any]] = []
+    n_cells = len(cell_cols)
+    next_event_report = max(1, int(progress_every_events))
 
-    for cell_name in cell_cols:
+    print(f"Starting peak-stats analysis for {n_cells} cells across {len(gcamp_df)} frames")
+
+    for cell_idx, cell_name in enumerate(cell_cols, start=1):
         trace = gcamp_df[cell_name]
         peak_indices = detect_peak_indices_from_trace(
             trace,
@@ -299,6 +317,22 @@ def compute_peak_stats_for_all_cells(
                     stats.clip_end,
                 )
             rows.append(row)
+
+        cumulative_events = len(rows)
+        should_report = (
+            cell_idx == 1
+            or cell_idx == n_cells
+            or (progress_every_cells > 0 and cell_idx % int(progress_every_cells) == 0)
+            or cumulative_events >= next_event_report
+        )
+        if should_report:
+            pct = (100.0 * cell_idx / n_cells) if n_cells > 0 else 100.0
+            print(
+                f"[progress] cells {cell_idx}/{n_cells} ({pct:.1f}%) "
+                f"| current={cell_name} | cumulative_events={cumulative_events}"
+            )
+            while cumulative_events >= next_event_report:
+                next_event_report += max(1, int(progress_every_events))
 
     if not rows:
         return pd.DataFrame(
@@ -357,6 +391,8 @@ def main() -> int:
         window_len_offset=args.window_len_offset,
         plt_region=args.plt_region,
         behavior_columns=["X_coor", "Y_coor", "Velocity_spatial_filtered"],
+        progress_every_cells=args.progress_every_cells,
+        progress_every_events=args.progress_every_events,
     )
     save_peak_stats_csv(stats_df, output_csv)
 
