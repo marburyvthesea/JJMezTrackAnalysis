@@ -10,11 +10,12 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  sbatch run_peak_stats_from_gcamp_csv.sbatch /path/to/GCAMP_with_velocity.csv [--output-dir /path/to/output] [--conda-env ENV] [--repo-dir /path/to/JJMezTrackAnalysis] [-- extra python args]
+  sbatch run_peak_stats_from_gcamp_csv.sbatch /path/to/GCAMP_with_velocity.csv [--output-dir /path/to/output] [--omit-clips] [--conda-env ENV] [--repo-dir /path/to/JJMezTrackAnalysis] [-- extra python args]
 
 Examples:
   sbatch slurm/run_peak_stats_from_gcamp_csv.sbatch /projects/b1118/CaliAli_linearTrackData/m328_analysis/GCAMP_with_velocity.csv
   sbatch slurm/run_peak_stats_from_gcamp_csv.sbatch /projects/b1118/CaliAli_linearTrackData/m328_analysis/GCAMP_with_velocity.csv --output-dir /projects/b1118/CaliAli_linearTrackData/m328_analysis
+  sbatch slurm/run_peak_stats_from_gcamp_csv.sbatch /projects/b1118/CaliAli_linearTrackData/m328_analysis/GCAMP_with_velocity.csv --omit-clips
   sbatch slurm/run_peak_stats_from_gcamp_csv.sbatch /projects/b1118/CaliAli_linearTrackData/m328_analysis/GCAMP_with_velocity.csv -- --threshold 3.0 --min-peak-prominence 2.0
 EOF
 }
@@ -28,6 +29,7 @@ GCAMP_CSV=""
 OUTPUT_DIR=""
 CONDA_ENV="jupyter-kernel-py38"
 REPO_DIR="$HOME/JJMezTrackAnalysis"
+OMIT_CLIPS=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +45,10 @@ while [[ $# -gt 0 ]]; do
         --repo-dir)
             REPO_DIR="$2"
             shift 2
+            ;;
+        --omit-clips)
+            OMIT_CLIPS=1
+            shift
             ;;
         --)
             shift
@@ -99,6 +105,9 @@ export PYTHONUNBUFFERED=1
 CMD=(python -u "$SCRIPT_PATH" --gcamp-csv "$GCAMP_CSV")
 if [[ -n "$OUTPUT_DIR" ]]; then
     CMD+=(--output-dir "$OUTPUT_DIR")
+fi
+if [[ "$OMIT_CLIPS" -eq 1 ]]; then
+    CMD+=(--omit-clips)
 fi
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
     CMD+=("${EXTRA_ARGS[@]}")

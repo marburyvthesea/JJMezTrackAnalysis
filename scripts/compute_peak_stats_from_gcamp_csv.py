@@ -22,7 +22,7 @@ class PeakStats:
     length_samples: int
     clip_start: int
     clip_end: int
-    clipped_region: np.ndarray
+    clipped_region: Optional[np.ndarray]
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,6 +68,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-len-onset", type=int, default=3)
     parser.add_argument("--window-len-offset", type=int, default=3)
     parser.add_argument("--plt-region", type=int, default=10)
+    parser.add_argument(
+        "--omit-clips",
+        action="store_true",
+        help=(
+            "Write a lighter CSV that excludes clipped trace/behavior arrays and "
+            "keeps only scalar peak summary columns."
+        ),
+    )
     parser.add_argument(
         "--progress-every-cells",
         type=int,
@@ -169,6 +177,7 @@ def get_peak_stats_for_peak(
     window_len_onset: int,
     window_len_offset: int,
     plt_region: int,
+    include_clipped_region: bool = True,
 ) -> PeakStats:
     z = as_1d_float_array(z_scores, "z_scores")
     tr = as_1d_float_array(cell_trace, "cell_trace")
@@ -204,6 +213,8 @@ def get_peak_stats_for_peak(
     clip_start = max(0, onset_idx - plt_region)
     clip_end = min(n - 1, offset_idx + plt_region)
 
+    clipped_region = tr[clip_start:clip_end + 1].copy() if include_clipped_region else None
+
     return PeakStats(
         peak_idx=int(peak_idx),
         onset_idx=int(onset_idx),
@@ -212,7 +223,7 @@ def get_peak_stats_for_peak(
         length_samples=int(offset_idx - onset_idx),
         clip_start=int(clip_start),
         clip_end=int(clip_end),
-        clipped_region=tr[clip_start:clip_end + 1].copy(),
+        clipped_region=clipped_region,
     )
 
 
@@ -264,6 +275,7 @@ def compute_peak_stats_for_all_cells(
     window_len_offset: int,
     plt_region: int,
     behavior_columns: Sequence[str],
+    include_clips: bool = True,
     progress_every_cells: int = 10,
     progress_every_events: int = 1000,
 ) -> pd.DataFrame:
@@ -274,7 +286,8 @@ def compute_peak_stats_for_all_cells(
     next_event_report = max(1, int(progress_every_events))
 
     print(
-        f"Starting peak-stats analysis for {n_cells} cells across {len(gcamp_df)} frames",
+        f"Starting peak-stats analysis for {n_cells} cells across {len(gcamp_df)} frames "
+        f"| include_clips={include_clips}",
         flush=True,
     )
 
@@ -300,6 +313,7 @@ def compute_peak_stats_for_all_cells(
                 window_len_onset=window_len_onset,
                 window_len_offset=window_len_offset,
                 plt_region=plt_region,
+                include_clipped_region=include_clips,
             )
             row: Dict[str, Any] = {
                 "cell": cell_name,
@@ -311,14 +325,15 @@ def compute_peak_stats_for_all_cells(
                 "length_samples": stats.length_samples,
                 "clip_start": stats.clip_start,
                 "clip_end": stats.clip_end,
-                "clipped_region": stats.clipped_region,
             }
-            for col in requested_behavior_cols:
-                row[f"{col}_clipped_region"] = slice_clipped_region(
-                    gcamp_df[col],
-                    stats.clip_start,
-                    stats.clip_end,
-                )
+            if include_clips:
+                row["clipped_region"] = stats.clipped_region
+                for col in requested_behavior_cols:
+                    row[f"{col}_clipped_region"] = slice_clipped_region(
+                        gcamp_df[col],
+                        stats.clip_start,
+                        stats.clip_end,
+                    )
             rows.append(row)
 
         cumulative_events = len(rows)
@@ -350,8 +365,11 @@ def compute_peak_stats_for_all_cells(
                 "length_samples",
                 "clip_start",
                 "clip_end",
-                "clipped_region",
-                *[f"{col}_clipped_region" for col in requested_behavior_cols],
+                *(
+                    ["clipped_region", *[f"{col}_clipped_region" for col in requested_behavior_cols]]
+                    if include_clips
+                    else []
+                ),
             ]
         )
 
@@ -395,6 +413,7 @@ def main() -> int:
         window_len_offset=args.window_len_offset,
         plt_region=args.plt_region,
         behavior_columns=["X_coor", "Y_coor", "Velocity_spatial_filtered"],
+        include_clips=not args.omit_clips,
         progress_every_cells=args.progress_every_cells,
         progress_every_events=args.progress_every_events,
     )
