@@ -5,7 +5,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
-#SBATCH --o ./logfiles/peak-stats-%j.out
+#SBATCH -o ./logfiles/peak-stats-%j.out
 
 set -euo pipefail
 
