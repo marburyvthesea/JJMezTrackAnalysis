@@ -938,6 +938,8 @@ def render_static_trace_panel(
     clip_bounds: Optional[Tuple[int, int]] = None,
     center_idx: Optional[int] = None,
     panel_label: Optional[str] = None,
+    scale_to_clip: bool = False,
+    ylim_pad_frac: float = 0.08,
 ) -> np.ndarray:
     """
     Render a static trace panel that can be appended beneath movie frames.
@@ -963,8 +965,20 @@ def render_static_trace_panel(
     inner_h = max(2, height - margin_top - margin_bottom)
 
     finite = np.isfinite(arr)
-    if np.any(finite):
-        arr_finite = arr[finite]
+
+    arr_for_ylim = arr
+    if scale_to_clip and clip_bounds is not None:
+        clip_start, clip_end = clip_bounds
+        clip_start = max(0, int(clip_start))
+        clip_end = min(arr.size, int(clip_end))
+        if clip_end > clip_start:
+            clip_arr = arr[clip_start:clip_end]
+            if np.any(np.isfinite(clip_arr)):
+                arr_for_ylim = clip_arr
+
+    finite_for_ylim = np.isfinite(arr_for_ylim)
+    if np.any(finite_for_ylim):
+        arr_finite = arr_for_ylim[finite_for_ylim]
         lo = float(np.min(arr_finite))
         hi = float(np.max(arr_finite))
     else:
@@ -974,6 +988,10 @@ def render_static_trace_panel(
     if np.isclose(hi, lo):
         lo -= 0.5
         hi += 0.5
+    else:
+        pad = max(1e-6, (hi - lo) * float(ylim_pad_frac))
+        lo -= pad
+        hi += pad
 
     def _sample_to_x(sample_idx: int) -> int:
         if arr.size == 1:
@@ -1066,6 +1084,8 @@ def append_static_trace_panel(
     center_idx: Optional[int] = None,
     panel_height: int = 96,
     panel_label: Optional[str] = None,
+    scale_to_clip: bool = False,
+    ylim_pad_frac: float = 0.08,
 ) -> np.ndarray:
     """
     Append one static trace image beneath every movie frame.
@@ -1078,6 +1098,8 @@ def append_static_trace_panel(
         clip_bounds=clip_bounds,
         center_idx=center_idx,
         panel_label=panel_label,
+        scale_to_clip=scale_to_clip,
+        ylim_pad_frac=ylim_pad_frac,
     )
     panel_stack = np.repeat(trace_panel[None, ...], movie_rgb.shape[0], axis=0)
     return np.concatenate([movie_rgb, panel_stack], axis=1)
@@ -1238,6 +1260,8 @@ def create_inline_peak_clip(
     highlight_strength: float = 0.85,
     show_trace_panel: bool = False,
     trace_panel_height: int = 96,
+    trace_panel_scale_to_clip: bool = False,
+    trace_panel_ylim_pad_frac: float = 0.08,
     show_frame_numbers: bool = True,
     frame_number_font_scale: float = 0.5,
     frame_number_thickness: int = 1,
@@ -1260,6 +1284,11 @@ def create_inline_peak_clip(
     show_trace_panel : bool
         If True, append a static panel of the selected cell's full trace beneath
         each movie frame, with the current clip bounds and peak center marked.
+    trace_panel_scale_to_clip : bool
+        If True, scale the trace panel y-range from just the current clip window
+        instead of the full-session trace, which makes local peaks easier to see.
+    trace_panel_ylim_pad_frac : float
+        Fractional padding added above and below the trace-panel y-range.
     show_frame_numbers : bool
         If True, overlay the aligned-GCAMP/miniscope frame number in the upper
         right corner of each frame.
@@ -1288,6 +1317,8 @@ def create_inline_peak_clip(
             center_idx=meta["center_idx"],
             panel_height=trace_panel_height,
             panel_label=f"{cell_name_or_idx} trace",
+            scale_to_clip=trace_panel_scale_to_clip,
+            ylim_pad_frac=trace_panel_ylim_pad_frac,
         )
 
     if show_frame_numbers:
